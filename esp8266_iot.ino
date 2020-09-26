@@ -17,13 +17,14 @@ const char *ssid = APSSID;
 const char *password = APPSK;
 
 //MQTT details
-const char* mqtt_server = "broker.hivemq.com";
-const int mqtt_port = 1883;
-const char* mqtt_user = NULL;
-const char* mqtt_pass = NULL;
-const char* intopic = "intopic"; //subscription topic
-const char* outtopic = "outtopic"; //publishing topic
-const char* lwtMessage = "ESP8266 went offline";
+const char* mqtt_server = "";
+int mqtt_port = 0;
+const char* mqtt_user = "";
+const char* mqtt_pass = "";
+const char* intopic = ""; //subscription topic
+const char* outtopic = ""; //publishing topic
+const char* lwtMessage = "";
+long lastReconnectAttempt = 0;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -38,11 +39,6 @@ ESP8266WebServer server(80);
 const char PROGMEM root[] = R"=====(
 <html>
 <head>
-<style>
-  table, th, td {
-  border: 1px solid black;
-  }
-</style>
 </head>
 <body onload="fetchnetworks()">
 <h2>ESP8266 Settings Update</h2>
@@ -50,10 +46,38 @@ const char PROGMEM root[] = R"=====(
 
 <div id="net_list"></div>
 <br>
-<table>
+<table style="width:40%">
   <tr>
-    <td>Password</td>
+    <td>WiFi Password</td>
     <td><input value="" type="password" id="password" placeholder="WiFi password"/></td>
+  </tr>
+  <tr>
+    <td>MQTT server</td>
+    <td><input value="broker.hivemq.com" type="text" id="mqttserver" placeholder="MQTT server"/></td>
+  </tr>
+  <tr>
+    <td>MQTT port</td>
+    <td><input value="1883" type="text" id="mqttport" placeholder="MQTT port"/></td>
+  </tr>
+  <tr>
+    <td>MQTT user</td>
+    <td><input value="NULL" type="text" id="mqttuser" placeholder="MQTT user"/></td>
+  </tr>
+  <tr>
+    <td>MQTT password</td>
+    <td><input value="NULL" type="password" id="mqttpassword" placeholder="MQTT password"/></td>
+  </tr>
+  <tr>
+    <td>MQTT subscribe</td>
+    <td><input value="intopic" type="text" id="mqttsubtopic" placeholder="MQTT subscribe"/></td>
+  </tr>
+  <tr>
+    <td>MQTT publish</td>
+    <td><input value="outtopic" type="text" id="mqttpubtopic" placeholder="MQTT publish"/></td>
+  </tr>
+  <tr>
+    <td>MQTT last will</td>
+    <td><input value="ESP went offline" type="text" id="mqttlwt" placeholder="Last will message"/></td>
   </tr>
 </table>
 <br>
@@ -64,7 +88,7 @@ const char PROGMEM root[] = R"=====(
 <h4>Server Settings</h4>
 <ul id="server_settings"></ul>
 <h4>Diagnostics</h4>
-<table style="width:30%">
+<table style="width:40%">
   <tr>
     <th>LED Status</th>
     <th>Interpretation</th> 
@@ -113,16 +137,6 @@ function fetchnetworks() { // called after home page loads
         container.appendChild(newline);
      }
      document.getElementById("networks").innerHTML = "Available networks: " + data.length;
-
-     console.log(JSON.stringify(respObj.mqtt_data));
-     var str = "<li>MQTT server: " + respObj.mqtt_data["server"] + "</li>" +
-               "<li>MQTT port: " + respObj.mqtt_data["port"] + "</li>" +
-               "<li>MQTT user: " + respObj.mqtt_data["username"] + "</li>" +
-               "<li>MQTT pass: " + respObj.mqtt_data["password"] + "</li>" +
-               "<li>Publish topic: " + respObj.mqtt_data["pub_topic"] + "</li>" +
-               "<li>Subscribed topic: " + respObj.mqtt_data["sub_topic"] + "</li>" +
-               "<li>Last will: " + respObj.mqtt_data["lwt"] + "</li>";
-     document.getElementById("server_settings").innerHTML = str;
     }
   };
   xhttp.open("GET", "/fetchnetworks", true);
@@ -140,8 +154,17 @@ function uploadConfig() {
         }
   });
   var password = document.getElementById("password").value;
-  console.log("SSID: " + ssid + ", Password: " + password);
-  var credentials = {ssid:ssid, password:password};
+  var mqttserver = document.getElementById("mqttserver").value;
+  var mqttport = document.getElementById("mqttport").value;
+  var mqttuser = document.getElementById("mqttuser").value;
+  var mqttpassword = document.getElementById("mqttpassword").value;
+  var mqttsubtopic = document.getElementById("mqttsubtopic").value;
+  var mqttpubtopic = document.getElementById("mqttpubtopic").value;
+  var mqttlwt = document.getElementById("mqttlwt").value;
+
+  var credentials = {ssid:ssid, password:password, mqttserver:mqttserver, mqttport:mqttport, mqttuser:mqttuser, mqttpassword:mqttpassword, mqttsubtopic:mqttsubtopic, mqttpubtopic:mqttpubtopic, mqttlwt:mqttlwt};
+  console.log(JSON.stringify(credentials));
+  
   xhttp.onreadystatechange = function() {
     if (this.readyState == 4 && this.status == 200) {
       console.log(this.responseText);
@@ -196,22 +219,12 @@ void handleConfigUpdate() {
 void fetchnetworks() {
   DynamicJsonBuffer jsonBuffer;
   JsonObject& root = jsonBuffer.createObject();
-  JsonObject& mqtt_data = root.createNestedObject("mqtt_data");
-  mqtt_data["server"] = mqtt_server;
-  mqtt_data["port"] = mqtt_port;
-  mqtt_data["username"] = mqtt_user;
-  mqtt_data["password"] = mqtt_pass;
-  mqtt_data["sub_topic"] = intopic;
-  mqtt_data["pub_topic"] = outtopic;
-  mqtt_data["lwt"] = lwtMessage;
   JsonArray& networks = root.createNestedArray("networks");
   Serial.print("Scan start ... ");
   int n = WiFi.scanNetworks();
   Serial.print(n);
   Serial.println(" network(s) found");
-  for (int i = 0; i < n; i++)
-  {
-    Serial.println(WiFi.SSID(i));
+  for (int i = 0; i < n; i++) {
     networks.add(WiFi.SSID(i));
   }
   root.prettyPrintTo(Serial);
@@ -228,6 +241,7 @@ void setup() {
   SPIFFS.begin(); //mount file system
   pinMode(LED_BUILTIN, OUTPUT);
   initWiFi();
+  lastReconnectAttempt = 0; // this is for MQTT client
 
   // Start MDNS responder: This is a shakey bit. Sometimes node needs restart to work
   if (!MDNS.begin("esp8266")) {
@@ -252,10 +266,20 @@ void setup() {
 void loop() {
   MDNS.update(); // MDNS listener
   server.handleClient(); // HTTP server listener
+
   if (!client.connected() && WiFi.status() == WL_CONNECTED) {
-     reconnect(); //MQTT connection listener
+    long now = millis();
+    if (now - lastReconnectAttempt > 5000) {
+      lastReconnectAttempt = now;
+      // Attempt to reconnect
+      if (reconnect()) {
+        lastReconnectAttempt = 0;
+      }
+    }
+  } else {
+    // Client connected
+    client.loop();
   }
-  client.loop();
 }
 
 void initWiFi() {
@@ -276,11 +300,23 @@ void initWiFi() {
       if(jObject.success()) {
         _ssid = jObject["ssid"];
         _pass = jObject["password"];
-        Serial.println("Read SSID from JSON: " + String(_ssid));
-        Serial.println("Read PASS from JSON: " + String(_pass));
+        // Also save MQTT server data from browser request
+        mqtt_server = jObject["mqttserver"];
+        String mqtt_port_str = jObject["mqttport"];
+        mqtt_port = mqtt_port_str.toInt();
+        mqtt_user = jObject["mqttuser"];
+        mqtt_pass = jObject["mqttpassword"];
+        intopic = jObject["mqttsubtopic"];
+        outtopic = jObject["mqttpubtopic"];
+        lwtMessage = jObject["mqttlwt"];
+
+        Serial.print("Reading stored config: ");
+        Serial.println();
+        jObject.prettyPrintTo(Serial);
+        Serial.println();
+        Serial.print("Connecting to home wifi using stored credentials..");
         WiFi.mode(WIFI_STA);
         WiFi.begin(_ssid, _pass);
-        Serial.print("Connecting to home wifi using stored credentials..");
         unsigned long startTime = millis();
         while (WiFi.status() != WL_CONNECTED) {
           delay(500);
@@ -353,7 +389,31 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.println();
 }
 
-void reconnect() {
+boolean reconnect() {
+  // Create a random client ID
+  digitalWrite(LED_BUILTIN, LOW); // indicate MQTT connection is in progress
+  delay(100);
+  digitalWrite(LED_BUILTIN, HIGH);
+  String clientId = "ESP8266Client-";
+  clientId += String(random(0xffff), HEX);
+  if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass, outtopic, 1, 1, lwtMessage)) {
+      Serial.println("MQTT connection re-established.");
+      // Once connected, publish an announcement...
+      client.publish(outtopic, "MQTT connection re-established.");
+      // ... and resubscribe
+      client.subscribe(intopic);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 3 seconds");
+      // Wait 3 seconds before retrying
+      delay(3000);
+    }
+  return client.connected();
+}
+
+/*
+ * void reconnect() {
   // Loop until we're reconnected
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
@@ -380,6 +440,7 @@ void reconnect() {
   }
   digitalWrite(LED_BUILTIN, HIGH); // indicate MQTT connection established
 }
+ */
 
 void handleCommand(char buf[], unsigned int length) { //Command format: opcode|gpio_num|state
   int i = 0;
