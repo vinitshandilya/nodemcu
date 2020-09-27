@@ -12,6 +12,8 @@
 #define APPSK  "12345678"
 #endif
 
+const char* mdns_addr="";
+
 //AP crdentials
 const char *ssid = APSSID;
 const char *password = APPSK;
@@ -52,31 +54,39 @@ const char PROGMEM root[] = R"=====(
     <td><input value="" type="password" id="password" placeholder="WiFi password"/></td>
   </tr>
   <tr>
-    <td>MQTT server</td>
+    <td>Multicast DNS</td>
+    <td><input value="esp8266" type="text" id="mdnsaddress" placeholder="MDNS address"/> .local</td>
+  </tr>
+</table>
+
+<h4>MQTT server details</h4>
+<table style="width:40%">
+  <tr>
+    <td>Broker</td>
     <td><input value="broker.hivemq.com" type="text" id="mqttserver" placeholder="MQTT server"/></td>
   </tr>
   <tr>
-    <td>MQTT port</td>
+    <td>Port</td>
     <td><input value="1883" type="text" id="mqttport" placeholder="MQTT port"/></td>
   </tr>
   <tr>
-    <td>MQTT user</td>
+    <td>Username</td>
     <td><input value="NULL" type="text" id="mqttuser" placeholder="MQTT user"/></td>
   </tr>
   <tr>
-    <td>MQTT password</td>
+    <td>Password</td>
     <td><input value="NULL" type="password" id="mqttpassword" placeholder="MQTT password"/></td>
   </tr>
   <tr>
-    <td>MQTT subscribe</td>
+    <td>Subscribe</td>
     <td><input value="intopic" type="text" id="mqttsubtopic" placeholder="MQTT subscribe"/></td>
   </tr>
   <tr>
-    <td>MQTT publish</td>
+    <td>Publish</td>
     <td><input value="outtopic" type="text" id="mqttpubtopic" placeholder="MQTT publish"/></td>
   </tr>
   <tr>
-    <td>MQTT last will</td>
+    <td>Last will</td>
     <td><input value="ESP went offline" type="text" id="mqttlwt" placeholder="Last will message"/></td>
   </tr>
 </table>
@@ -85,8 +95,6 @@ const char PROGMEM root[] = R"=====(
   <button onclick="uploadConfig()">Save and restart</button>
 </div>
 <h5 style="color:red;"><i>*sending nil SSID and password would delete saved network and restart the node.</i></h5>
-<h4>Server Settings</h4>
-<ul id="server_settings"></ul>
 <h4>Diagnostics</h4>
 <table style="width:40%">
   <tr>
@@ -154,6 +162,7 @@ function uploadConfig() {
         }
   });
   var password = document.getElementById("password").value;
+  var mdnsaddress = document.getElementById("mdnsaddress").value;
   var mqttserver = document.getElementById("mqttserver").value;
   var mqttport = document.getElementById("mqttport").value;
   var mqttuser = document.getElementById("mqttuser").value;
@@ -162,7 +171,7 @@ function uploadConfig() {
   var mqttpubtopic = document.getElementById("mqttpubtopic").value;
   var mqttlwt = document.getElementById("mqttlwt").value;
 
-  var credentials = {ssid:ssid, password:password, mqttserver:mqttserver, mqttport:mqttport, mqttuser:mqttuser, mqttpassword:mqttpassword, mqttsubtopic:mqttsubtopic, mqttpubtopic:mqttpubtopic, mqttlwt:mqttlwt};
+  var credentials = {ssid:ssid, password:password, mdnsaddress:mdnsaddress, mqttserver:mqttserver, mqttport:mqttport, mqttuser:mqttuser, mqttpassword:mqttpassword, mqttsubtopic:mqttsubtopic, mqttpubtopic:mqttpubtopic, mqttlwt:mqttlwt};
   console.log(JSON.stringify(credentials));
   
   xhttp.onreadystatechange = function() {
@@ -210,7 +219,12 @@ void handleConfigUpdate() {
   File configFile = SPIFFS.open("/config.json", "w");
   jObject.printTo(configFile);  
   configFile.close();
-  Serial.println(data); //Received from browser
+  
+  Serial.print("Configuration written: ");
+  Serial.println();
+  jObject.prettyPrintTo(Serial);
+  Serial.println();
+        
   server.send(200, "application/json", "{\"status\":\"OK\"}");
   delay(500);
   initWiFi(); // Disconnect and then reconnect using updated credentials
@@ -244,13 +258,16 @@ void setup() {
   lastReconnectAttempt = 0; // this is for MQTT client
 
   // Start MDNS responder: This is a shakey bit. Sometimes node needs restart to work
-  if (!MDNS.begin("esp8266")) {
-    Serial.println("Error setting up MDNS responder!");
+  if (!MDNS.begin(mdns_addr)) {
+    Serial.println("Error setting up MDNS responder at " + String(mdns_addr));
     while (1) {
       delay(1000);
     }
   }
-  Serial.println("mDNS responder started");
+  Serial.println("mDNS responder started at http://");
+  Serial.print(mdns_addr);
+  Serial.print(".local");
+  Serial.println();
   
   server.on("/", handleRoot);
   server.on("/fetchnetworks", fetchnetworks);
@@ -309,6 +326,7 @@ void initWiFi() {
         intopic = jObject["mqttsubtopic"];
         outtopic = jObject["mqttpubtopic"];
         lwtMessage = jObject["mqttlwt"];
+        mdns_addr = jObject["mdnsaddress"];
 
         Serial.print("Reading stored config: ");
         Serial.println();
