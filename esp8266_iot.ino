@@ -12,20 +12,18 @@
 #define APPSK  "12345678"
 #endif
 
-const char* mdns_addr="";
-
 //AP crdentials
 const char *ssid = APSSID;
 const char *password = APPSK;
 
-//MQTT details
-const char* mqtt_server = "";
-int mqtt_port = 0;
-const char* mqtt_user = "";
-const char* mqtt_pass = "";
-const char* intopic = ""; //subscription topic
-const char* outtopic = ""; //publishing topic
-const char* lwtMessage = "";
+String mqttserver = "";
+int mqttport = 0;
+String mqttpubtopic = "";
+String mqttsubtopic = "";
+String lwtmessage = "";
+
+String mdnsaddress = "";
+
 long lastReconnectAttempt = 0;
 
 WiFiClient espClient;
@@ -226,8 +224,9 @@ void handleConfigUpdate() {
   Serial.println();
         
   server.send(200, "application/json", "{\"status\":\"OK\"}");
-  delay(500);
-  initWiFi(); // Disconnect and then reconnect using updated credentials
+  delay(1000);
+  //initWiFi(); // Disconnect and then reconnect using updated credentials
+  ESP.restart();
 }
 
 void fetchnetworks() {
@@ -248,6 +247,116 @@ void fetchnetworks() {
   server.send(200, "application/json", jsonStr);  
 }
 
+void initWiFi() {
+  WiFi.softAPdisconnect(true);
+  WiFi.disconnect();
+  delay(1000);
+
+  if(SPIFFS.exists("/config.json")) {
+    const char * _ssid = "", *_pass = "";
+    
+    File configFile = SPIFFS.open("/config.json", "r");
+    if(configFile) {
+      size_t size = configFile.size();
+      std::unique_ptr<char[]> buf(new char[size]);
+      configFile.readBytes(buf.get(), size);
+      configFile.close();
+      DynamicJsonBuffer jsonBuffer;
+      JsonObject& jObject = jsonBuffer.parseObject(buf.get());
+      if(jObject.success()) {
+        _ssid = jObject["ssid"];
+        _pass = jObject["password"];
+
+        mqttserver = jObject["mqttserver"].as<String>();
+        String mqttport_str = jObject["mqttport"];
+        mqttport = mqttport_str.toInt();
+
+        mqttpubtopic = jObject["mqttpubtopic"].as<String>();
+        mqttsubtopic = jObject["mqttsubtopic"].as<String>();
+        lwtmessage = jObject["mqttlwt"].as<String>();
+        mdnsaddress = jObject["mdnsaddress"].as<String>();
+        
+        Serial.print("Reading stored config: ");
+        Serial.println();
+        jObject.prettyPrintTo(Serial);
+        Serial.println();
+        Serial.print("Connecting to home wifi using stored credentials..");
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(_ssid, _pass);
+        unsigned long startTime = millis();
+        while (WiFi.status() != WL_CONNECTED) {
+          delay(500);
+          Serial.print(".");
+          digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+          if(millis()-startTime > 5000) {
+            break;
+          }
+        }
+        randomSeed(micros());
+        
+        if(WiFi.status() == WL_CONNECTED) {
+          Serial.println("Connected to WiFi using stored credentials.");
+          Serial.print("Station IP [");
+          Serial.print(WiFi.localIP());
+          Serial.print("] ");
+          Serial.println("Please visit station IP in your browser to change WiFi network.");
+          digitalWrite(LED_BUILTIN, HIGH); //Turn off LED to indicate success Wifi connection
+          
+        } else {
+          Serial.println("Could not connect to WiFi using stored credentials.");
+          Serial.println("Connect to below AP and set up ESP8266 by visiting 192.168.4.1 in browser.");
+          WiFi.mode(WIFI_AP);
+          WiFi.softAP(ssid, password);
+          IPAddress myIP = WiFi.softAPIP();
+          Serial.print("AP IP address: ");
+          Serial.println(myIP);
+          digitalWrite(LED_BUILTIN, LOW); // Turn on LED to indicate AP mode connection available 
+        } 
+      }
+    }
+  }
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+
+  Serial.print("Payload length [");
+  Serial.print(length);
+  Serial.print("] ");
+
+  char message[length];
+  for (int i = 0; i < length; i++) {
+    message[i] = (char)payload[i];
+  }
+  Serial.print(message);
+  Serial.println();
+
+  handleCommand(message);
+}
+
+boolean reconnect() {
+  // Create a random client ID
+  digitalWrite(LED_BUILTIN, LOW); // indicate MQTT connection is in progress
+  delay(100);
+  digitalWrite(LED_BUILTIN, HIGH);
+  String clientId = "ESP8266Client-";
+  clientId += String(random(0xffff), HEX);
+  if (client.connect(clientId.c_str(), NULL, NULL, strdup(mqttpubtopic.c_str()), 1, 0, strdup(lwtmessage.c_str()))) {
+      Serial.println("MQTT connection re-established.");
+      // Once connected, publish an announcement...
+      client.publish(strdup(mqttpubtopic.c_str()), "MQTT connection re-established.");
+      // ... and resubscribe
+      client.subscribe(strdup(mqttsubtopic.c_str()));
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+    }
+  return client.connected();
+}
+
 void setup() {
   delay(1000);
   Serial.begin(115200);
@@ -255,20 +364,8 @@ void setup() {
   SPIFFS.begin(); //mount file system
   pinMode(LED_BUILTIN, OUTPUT);
   initWiFi();
-  lastReconnectAttempt = 0; // this is for MQTT client
 
-  // Start MDNS responder: This is a shakey bit. Sometimes node needs restart to work
-  if (!MDNS.begin(mdns_addr)) {
-    Serial.println("Error setting up MDNS responder at " + String(mdns_addr));
-    while (1) {
-      delay(1000);
-    }
-  }
-  Serial.println("mDNS responder started at http://");
-  Serial.print(mdns_addr);
-  Serial.print(".local");
-  Serial.println();
-  
+  // Handle routes
   server.on("/", handleRoot);
   server.on("/fetchnetworks", fetchnetworks);
   server.on("/updateconfig", handleConfigUpdate);
@@ -276,8 +373,20 @@ void setup() {
   server.begin();
   Serial.println("HTTP server started");
 
-  // Add service to MDNS-SD
+  // Initialize MQTT broker
+  client.setServer (strdup(mqttserver.c_str()), mqttport);
+  client.setCallback(callback);
+
+  // Initialize MDNS  
+  if (!MDNS.begin(strdup(mdnsaddress.c_str()))) {
+    Serial.println("Error setting up mDNS responder");
+    while (1) {
+      delay(1000);
+    }
+  }
+  Serial.println("mDNS responder started!");
   MDNS.addService("http", "tcp", 80);
+  
 }
 
 void loop() {
@@ -299,203 +408,36 @@ void loop() {
   }
 }
 
-void initWiFi() {
-  WiFi.softAPdisconnect(true);
-  WiFi.disconnect();
-  delay(1000);
-
-  if(SPIFFS.exists("/config.json")) {
-    const char * _ssid = "", *_pass = "";
-    File configFile = SPIFFS.open("/config.json", "r");
-    if(configFile) {
-      size_t size = configFile.size();
-      std::unique_ptr<char[]> buf(new char[size]);
-      configFile.readBytes(buf.get(), size);
-      configFile.close();
-      DynamicJsonBuffer jsonBuffer;
-      JsonObject& jObject = jsonBuffer.parseObject(buf.get());
-      if(jObject.success()) {
-        _ssid = jObject["ssid"];
-        _pass = jObject["password"];
-        // Also save MQTT server data from browser request
-        mqtt_server = jObject["mqttserver"];
-        String mqtt_port_str = jObject["mqttport"];
-        mqtt_port = mqtt_port_str.toInt();
-        mqtt_user = jObject["mqttuser"];
-        mqtt_pass = jObject["mqttpassword"];
-        intopic = jObject["mqttsubtopic"];
-        outtopic = jObject["mqttpubtopic"];
-        lwtMessage = jObject["mqttlwt"];
-        mdns_addr = jObject["mdnsaddress"];
-
-        Serial.print("Reading stored config: ");
-        Serial.println();
-        jObject.prettyPrintTo(Serial);
-        Serial.println();
-        Serial.print("Connecting to home wifi using stored credentials..");
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(_ssid, _pass);
-        unsigned long startTime = millis();
-        while (WiFi.status() != WL_CONNECTED) {
-          delay(500);
-          Serial.print(".");
-          digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-          if(millis()-startTime > 5000) {
-            break;
-          }
-        }
-        if(WiFi.status() == WL_CONNECTED) {
-          Serial.println("Connected to WiFi using stored credentials.");
-          delay(1000);
-          Serial.print("Station IP [");
-          Serial.print(WiFi.localIP());
-          Serial.print("] ");
-          Serial.println("Please visit station IP in your browser to change WiFi network.");
-          digitalWrite(LED_BUILTIN, HIGH); //Turn off LED to indicate success Wifi connection
+void handleCommand(char command[]) {
+  //client.publish(strdup(mqttpubtopic.c_str()), command);
+  DynamicJsonBuffer jBuffer;
+  JsonObject& jObject = jBuffer.parseObject(command);
   
-          //Now connect to MQTT after connecting to internet
-          initMQTT();
-        
-        } else {
-          Serial.println("Could not connect to WiFi using stored credentials.");
-          Serial.println("Connect to below AP and set up ESP8266 by visiting 192.168.4.1 in browser.");
-          WiFi.mode(WIFI_AP);
-          WiFi.softAP(ssid, password);
-          IPAddress myIP = WiFi.softAPIP();
-          Serial.print("AP IP address: ");
-          Serial.println(myIP);
-          digitalWrite(LED_BUILTIN, LOW); // Turn on LED to indicate AP mode connection available 
-        } 
-      }
-    }
-  }
-}
-
-void initMQTT() {
-  client.setServer(mqtt_server, mqtt_port);
-  client.setCallback(callback);
-  Serial.print("Attempting MQTT connection...");
-  // Create a random client ID
-  String clientId = "ESP8266Client-";
-  clientId += String(random(0xffff), HEX);
-  // Attempt to connect
-  if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass, outtopic, 1, 1, lwtMessage)) {
-    Serial.println("connected");
-    delay(500);
-    client.subscribe(intopic);
-    // Once connected, publish an announcement...
-    client.publish(outtopic, "ESP8266 came online!");   
-  } else {
-    Serial.print("failed, rc=");
-    Serial.print(client.state());
-  }
-}
-
-void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-
-  char message[10]="";
-  for (int i = 0; i < length; i++) {
-    message[i] = (char)payload[i];
-  }
-  Serial.print(message);
-  //Test
-  //digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-  handleCommand(message, length);
-  Serial.println();
-}
-
-boolean reconnect() {
-  // Create a random client ID
-  digitalWrite(LED_BUILTIN, LOW); // indicate MQTT connection is in progress
-  delay(100);
-  digitalWrite(LED_BUILTIN, HIGH);
-  String clientId = "ESP8266Client-";
-  clientId += String(random(0xffff), HEX);
-  if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass, outtopic, 1, 1, lwtMessage)) {
-      Serial.println("MQTT connection re-established.");
-      // Once connected, publish an announcement...
-      client.publish(outtopic, "MQTT connection re-established.");
-      // ... and resubscribe
-      client.subscribe(intopic);
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 3 seconds");
-      // Wait 3 seconds before retrying
-      delay(3000);
-    }
-  return client.connected();
-}
-
-/*
- * void reconnect() {
-  // Loop until we're reconnected
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    digitalWrite(LED_BUILTIN, LOW); // indicate MQTT connection is in progress
-    delay(100);
-    digitalWrite(LED_BUILTIN, HIGH);
-    // Create a random client ID
-    String clientId = "ESP8266Client-";
-    clientId += String(random(0xffff), HEX);
-    // Attempt to connect
-    if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass, outtopic, 1, 1, lwtMessage)) {
-      Serial.println("MQTT connection re-established.");
-      // Once connected, publish an announcement...
-      client.publish(outtopic, "MQTT connection re-established.");
-      // ... and resubscribe
-      client.subscribe(intopic);
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 3 seconds");
-      // Wait 3 seconds before retrying
-      delay(3000);
-    }
-  }
-  digitalWrite(LED_BUILTIN, HIGH); // indicate MQTT connection established
-}
- */
-
-void handleCommand(char buf[], unsigned int length) { //Command format: opcode|gpio_num|state
-  int i = 0;
-  char *p = strtok (buf, "|");
-  char *array[3];
-  while (p != NULL) {
-    array[i++] = p;
-    p = strtok (NULL, "|");
-  }
-  String op = (String)array[0];
-  int gpio = ((String)array[1]).toInt();
-  int state = ((String)array[2]).equals("HIGH") ? HIGH : LOW;
-  Serial.println();
-  Serial.println(op);
+  String cmd = jObject["command"].as<String>();
+  int gpio = jObject["gpio"].as<String>().toInt();
+  bool state = jObject["state"].as<String>() == "HIGH" ? HIGH : LOW;
+  
+  Serial.println(cmd);
   Serial.println(gpio);
   Serial.println(state);
 
-  if(op.equals("wr")) {   ////////////////////////////// Ex. "wr|2|HIGH"
+  if(cmd == "write") {
     digitalWrite(gpio, state);
     readGpioAndPublish(gpio);
   }
-  else if(op.equals("rd")) {  ////////////////////////////// Ex. "rd|2"
-    readGpioAndPublish(gpio);    
+  else if(cmd == "read") {
+    readGpioAndPublish(gpio);
   }
-  else {
-    client.publish(outtopic, "invalid command");
-  }
- 
+  
 }
 
 void readGpioAndPublish(int gpio) {
   int _st = digitalRead(gpio);
   Serial.println(_st);
   if(digitalRead(gpio))
-    client.publish(outtopic, "HIGH");
+    client.publish(strdup(mqttpubtopic.c_str()), "HIGH");
   else if(!digitalRead(gpio))
-    client.publish(outtopic, "LOW");
+    client.publish(strdup(mqttpubtopic.c_str()), "LOW");
   else
-    client.publish(outtopic, "UNDEF");
+    client.publish(strdup(mqttpubtopic.c_str()), "UNDEF");
 }
