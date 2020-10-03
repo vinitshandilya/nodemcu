@@ -23,8 +23,13 @@ String mqttsubtopic = "";
 String lwtmessage = "";
 
 String mdnsaddress = "";
+int interval = 0, timeout = 0;
 
 long lastReconnectAttempt = 0;
+long start_t = 0;
+
+bool _blink = false, _schd = false;
+int _blink_gpio = -1, _schd_gpio = -1;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -406,6 +411,21 @@ void loop() {
     // Client connected
     client.loop();
   }
+
+  if(_blink) {
+    long now = millis();
+    if(now - start_t > interval) {
+      digitalWrite(_blink_gpio, !analogRead(_blink_gpio));
+      start_t = now;
+    }  
+  }
+
+  if(_schd) {
+    if(millis() - start_t > timeout) {
+      digitalWrite(_schd_gpio, !digitalRead(_schd_gpio));
+      _schd = false;
+    }
+  }
 }
 
 void handleCommand(char command[]) {
@@ -422,18 +442,30 @@ void handleCommand(char command[]) {
   Serial.println(state);
 
   if(cmd == "write") {
+    _blink = false; // if it was blinking before, then stop
     digitalWrite(gpio, state);
     readGpioAndPublish(gpio);
   }
   else if(cmd == "read") {
+    _blink = false; // if it was blinking before, then stop
     readGpioAndPublish(gpio);
   }
-  
+  else if(cmd == "blink") {
+    interval = jObject["interval"].as<String>().toInt();
+    _blink = true;
+    _blink_gpio = gpio;
+  }
+  else if(cmd == "schd") {
+    _blink = false;
+    timeout = jObject["timeout"].as<String>().toInt();
+    _schd_gpio = gpio;
+    start_t = millis();
+    _schd = true;
+  }
 }
 
 void readGpioAndPublish(int gpio) {
   int _st = digitalRead(gpio);
-  Serial.println(_st);
   if(digitalRead(gpio))
     client.publish(strdup(mqttpubtopic.c_str()), "HIGH");
   else if(!digitalRead(gpio))
