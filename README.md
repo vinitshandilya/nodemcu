@@ -8,6 +8,6 @@ Sample read/write commands:
 3. {"command":"blink","gpio":"2","interval":"100"} - Blink GPIO every x interval
 4. {"command":"schd","gpio":"2","timeout":"10000"} - Toggle GPIO state after x milliseconds
 
-The NodeMCU will receive commands on "intopic" and publish the command output on "outtopic". So, if you're using external MQTT client to send commands, please send above cmds to "intopic". Additionally, subscribe to "outtopic" to read results from NodeMCU.
+The NodeMCU will receive commands on "intopic" and publish the command output on "outtopic". So, if you're using external MQTT client to send commands, please send above cmds to "intopic". Additionally, subscribe to "outtopic" to read results from NodeMCU. Use blank MQTT broker username and password.
 
-<img width="405" alt="image" src="https://user-images.githubusercontent.com/7278088/161386426-076ad003-a15d-46f5-86bd-ecd43ff82d8c.png">
+<img width="584" alt="image" src="https://user-images.githubusercontent.com/7278088/161390167-0d5ab869-b7ef-40d2-8496-5ab11a5d58de.png">
