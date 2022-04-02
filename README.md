@@ -7,6 +7,7 @@ Sample read/write commands:
 2. {\"command\":\"read\",\"gpio\":\"2\"} - Read GPIO state
 3. {"command":"blink","gpio":"2","interval":"100"} - Blink GPIO every x interval
 4. {"command":"schd","gpio":"2","timeout":"10000"} - Toggle GPIO state after x milliseconds
+5. {"command":"pwm","gpio":"2","duty_c":"240"} - Enable PWM output on GPIO with 0 < duty_c < 255 (higher values means lower duty)
 
 The NodeMCU will receive commands on "intopic" and publish the command output on "outtopic". So, if you're using external MQTT client to send commands, please send above cmds to "intopic". Additionally, subscribe to "outtopic" to read results from NodeMCU. Use blank MQTT broker username and password.
 
